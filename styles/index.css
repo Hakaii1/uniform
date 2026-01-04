@@ -1,0 +1,49 @@
+/* :root {
+    --color-primary: #f472b6; 
+    --color-primary-hover: #ec4899; 
+    --color-primary-light: #fce7f3;
+
+    --color-success: #198754;
+    --color-success-bg: #d1e7dd;
+
+    --background-gradient: linear-gradient(135deg, var(--bg-primary) 10%, rgb(237, 179, 255) 90%);
+    --background-gradient-hover: linear-gradient(135deg, rgb(237, 179, 255) 10%, var(--bg-primary) 90%);
+
+    --color-danger: #dc3545;
+    --color-danger-bg: #f8d7da;
+    --color-warning: #ffc107;
+
+    --bg-primary: #ffe6f3;
+    --bg-surface: #ffffff;
+    --bg-secondary: #1e293b; 
+
+    --text-main: #334155;
+    --text-muted: #64748b;
+    --text-inverse: #ffffff;
+
+    --border-light: #e2e8f0;
+    --border-focus: #f472b6;
+
+    --rose-300: #ffa3c7;
+    --rose-400: #ff8ab8;
+    --rose-500: #f472b6;
+    --rose-600: #e11d48;
+
+    --radius-md: 12px; 
+    --radius-sm: 6px;
+    --shadow-card: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+body {
+    display: flex;
+
+    align-items: center;
+    justify-content: center;
+
+    background: var(--background-gradient);
+    height: 100vh;
+    color: var(--text-main);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji';
+    margin: 0;
+    padding: 0;
+} */
