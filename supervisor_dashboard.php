@@ -4,6 +4,7 @@ require_once 'auth/authenticate.php';
 restrictAccess(['Supervisor', 'Team Leader']);
 
 // Stats
+// Note: These counts show GLOBAL totals and do not respect the search filters below.
 $pendingCount = $conn->query("SELECT COUNT(*) FROM uniform_headers WHERE Status = 'Pending'")->fetchColumn();
 $approvedToday = $conn->query("SELECT COUNT(*) FROM uniform_headers WHERE Status = 'Approved' AND CAST(DateUpdated AS DATE) = CAST(GETDATE() AS DATE)")->fetchColumn();
 $totalWashed = $conn->query("SELECT SUM(d.QtyWashed) FROM uniform_details d JOIN uniform_headers h ON d.InspectionID = h.InspectionID WHERE h.Status = 'Approved'")->fetchColumn() ?? 0;
@@ -46,9 +47,10 @@ if (!empty($staff_search)) {
 $where_clause = implode(' AND ', $where_conditions);
 
 // Get total count for pagination
+// FIXED: Changed JOIN to LEFT JOIN so orphaned records are counted
 $count_sql = "SELECT COUNT(DISTINCT h.InspectionID) 
               FROM uniform_headers h 
-              JOIN lrn_master_list m ON h.StaffUID = m.id 
+              LEFT JOIN lrn_master_list m ON h.StaffUID = m.id 
               WHERE $where_clause";
 $count_stmt = $conn->prepare($count_sql);
 $count_stmt->execute($params);
@@ -59,24 +61,22 @@ $offset = ($page - 1) * $per_page;
 // Build ORDER BY clause - map sort_by to actual column names
 $sort_column_map = [
     'DateCreated' => 'h.DateCreated',
-    'StaffName' => 'm.FullName',
+    'StaffName' => 'h.StaffUID', // Sort by StaffUID since we can't sort by name directly from auth DB
     'InspectionID' => 'h.InspectionID'
 ];
 $sort_column = $sort_column_map[$sort_by] ?? 'h.DateCreated';
 
 // Only add InspectionID as secondary sort if it's not already the primary sort
-// Secondary sort uses DESC to show newest first as default
 if ($sort_by !== 'InspectionID') {
     $order_by = "ORDER BY $sort_column $sort_order, h.InspectionID DESC";
 } else {
     $order_by = "ORDER BY $sort_column $sort_order";
 }
 
-// Fetch pending inspections with pagination
-$sql = "SELECT DISTINCT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, m.FullName AS StaffName
-        FROM uniform_headers h 
-        JOIN lrn_master_list m ON h.StaffUID = m.id 
-        WHERE $where_clause 
+// Fetch pending inspections with pagination (without staff names first)
+$sql = "SELECT DISTINCT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.StaffUID
+        FROM uniform_headers h
+        WHERE $where_clause
         $order_by
         OFFSET :offset ROWS FETCH NEXT :per_page ROWS ONLY";
 
@@ -89,6 +89,27 @@ $stmt->bindValue(':per_page', $per_page, PDO::PARAM_INT);
 $stmt->execute();
 $headers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// Get staff names from auth database
+$staff_names = [];
+if (!empty($headers)) {
+    $staff_uids = array_unique(array_column($headers, 'StaffUID'));
+    if (!empty($staff_uids)) {
+        $placeholders = implode(',', array_fill(0, count($staff_uids), '?'));
+        $staff_sql = "SELECT id, FirstName, LastName FROM lrn_master_list WHERE id IN ($placeholders)";
+        $staff_results = safeQueryAll($staff_sql, $staff_uids, true); // true = use auth database
+
+        foreach ($staff_results as $staff) {
+            $staff_names[$staff['id']] = trim($staff['FirstName'] . ' ' . $staff['LastName']);
+        }
+    }
+}
+
+// Add staff names to headers
+foreach ($headers as &$header) {
+    $header['StaffName'] = $staff_names[$header['StaffUID']] ?? 'Unknown Staff';
+}
+unset($header); // Break reference
+
 // Get inspection IDs
 $inspection_ids = array_column($headers, 'InspectionID');
 $inspections = [];
@@ -96,11 +117,11 @@ $inspections = [];
 if (!empty($inspection_ids)) {
     // Fetch details for these inspections
     $placeholders = implode(',', array_fill(0, count($inspection_ids), '?'));
-    $details_sql = "SELECT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, m.FullName AS StaffName, d.DetailID, d.ItemCode, d.Description, d.RemovalOfDirt, d.QtyWashed, d.QtyRepair, d.QtyDisposal, d.Remarks, d.StaffPhoto 
-                    FROM uniform_headers h 
-                    JOIN lrn_master_list m ON h.StaffUID = m.id 
-                    LEFT JOIN uniform_details d ON h.InspectionID = d.InspectionID 
-                    WHERE h.InspectionID IN ($placeholders) 
+    $details_sql = "SELECT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.StaffUID,
+                    d.DetailID, d.ItemCode, d.Description, d.RemovalOfDirt, d.QtyWashed, d.QtyRepair, d.QtyDisposal, d.Remarks, d.StaffPhoto
+                    FROM uniform_headers h
+                    LEFT JOIN uniform_details d ON h.InspectionID = d.InspectionID
+                    WHERE h.InspectionID IN ($placeholders)
                     ORDER BY h.InspectionID, d.ItemCode";
     $details_stmt = $conn->prepare($details_sql);
     $details_stmt->execute($inspection_ids);
@@ -108,8 +129,9 @@ if (!empty($inspection_ids)) {
 
     foreach ($rows as $row) {
         $id = $row['InspectionID'];
+        $staff_name = $staff_names[$row['StaffUID']] ?? 'Unknown Staff';
         if (!isset($inspections[$id])) {
-            $inspections[$id] = ['header' => ['InspectionID' => $row['InspectionID'], 'DateCreated' => $row['DateCreated'], 'StaffName' => $row['StaffName']], 'items' => []];
+            $inspections[$id] = ['header' => ['InspectionID' => $row['InspectionID'], 'DateCreated' => $row['DateCreated'], 'StaffName' => $staff_name], 'items' => []];
         }
         if ($row['DetailID']) $inspections[$id]['items'][] = $row;
     }
@@ -414,7 +436,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     </h2>
                                     <p class="text-sm text-gray-500 mt-1">
                                         <i class="fas fa-user text-primary mr-2"></i>
-                                        <span class="font-semibold text-primary"><?php echo htmlspecialchars($insp['header']['StaffName']); ?></span>
+                                        <span class="font-semibold text-primary"><?php echo htmlspecialchars($insp['header']['StaffName'] ?? 'Unknown Staff'); ?></span>
                                     </p>
                                 </div>
                             </div>
@@ -449,12 +471,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                             </tr>
                                         </thead>
                                         <tbody>
+                                            <?php $itemCounter = 1; ?>
                                             <?php foreach ($insp['items'] as $item): ?>
                                             <tr>
                                                 <td>
-                                                    <input type="text" name="codes[<?php echo $item['DetailID']; ?>]" 
-                                                           value="<?php echo htmlspecialchars($item['ItemCode'] ?? ''); ?>"
-                                                           class="form-input w-full font-mono font-bold text-center text-sm">
+                                                    <div class="item-code-container flex items-center justify-center gap-2">
+                                                        <span class="item-code-display font-mono font-bold text-gray-700 text-sm cursor-pointer hover:text-primary transition-colors"
+                                                              onclick="editItemCode(this, '<?php echo $item['DetailID']; ?>')">
+                                                            <?php echo htmlspecialchars($item['ItemCode'] ?? 'UNI' . str_pad($itemCounter, 3, '0', STR_PAD_LEFT)); ?>
+                                                        </span>
+                                                        <button type="button" class="edit-code-btn text-gray-400 hover:text-primary transition-colors" onclick="editItemCode(this.previousElementSibling, '<?php echo $item['DetailID']; ?>')">
+                                                            <i class="fas fa-pencil-alt text-xs"></i>
+                                                        </button>
+                                                        <input type="text" name="codes[<?php echo $item['DetailID']; ?>]"
+                                                               value="<?php echo htmlspecialchars($item['ItemCode'] ?? 'UNI' . str_pad($itemCounter, 3, '0', STR_PAD_LEFT)); ?>"
+                                                               class="item-code-input form-input w-full font-mono font-bold text-center text-sm hidden">
+                                                    </div>
                                                 </td>
                                                 <td class="font-bold text-gray-700"><?php echo htmlspecialchars($item['Description']); ?></td>
                                                 <td class="text-gray-500 italic text-wrap-cell"><?php echo nl2br(htmlspecialchars($item['RemovalOfDirt'] ?? '—')); ?></td>
@@ -483,6 +515,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                                     <?php endif; ?>
                                                 </td>
                                             </tr>
+                                            <?php $itemCounter++; ?>
                                             <?php endforeach; ?>
                                         </tbody>
                                     </table>
@@ -808,6 +841,87 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if(e.target.id === 'reject-modal') document.getElementById('reject_inspection_id').value = '';
                 if(e.target.id === 'approve-confirm-modal') currentFormToSubmit = null;
             }
+        }
+
+        // --- Item Code Editing Functions ---
+        function editItemCode(displaySpan, detailId) {
+            const container = displaySpan.closest('.item-code-container');
+            const displayElement = container.querySelector('.item-code-display');
+            const editBtn = container.querySelector('.edit-code-btn');
+            const inputElement = container.querySelector('.item-code-input');
+
+            // Hide display and show input
+            displayElement.classList.add('hidden');
+            editBtn.classList.add('hidden');
+            inputElement.classList.remove('hidden');
+
+            // Focus the input and select all text
+            inputElement.focus();
+            inputElement.select();
+
+            // Add event listeners for saving/canceling
+            inputElement.addEventListener('blur', () => saveItemCode(container, detailId));
+            inputElement.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    saveItemCode(container, detailId);
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelItemCodeEdit(container);
+                }
+            });
+        }
+
+        function saveItemCode(container, detailId) {
+            const displayElement = container.querySelector('.item-code-display');
+            const editBtn = container.querySelector('.edit-code-btn');
+            const inputElement = container.querySelector('.item-code-input');
+
+            // Update the display text
+            displayElement.textContent = inputElement.value.trim() || displayElement.textContent;
+
+            // Hide input and show display
+            inputElement.classList.add('hidden');
+            displayElement.classList.remove('hidden');
+            editBtn.classList.remove('hidden');
+
+            // Remove event listeners
+            inputElement.removeEventListener('blur', () => saveItemCode(container, detailId));
+            inputElement.removeEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    saveItemCode(container, detailId);
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelItemCodeEdit(container);
+                }
+            });
+        }
+
+        function cancelItemCodeEdit(container) {
+            const displayElement = container.querySelector('.item-code-display');
+            const editBtn = container.querySelector('.edit-code-btn');
+            const inputElement = container.querySelector('.item-code-input');
+
+            // Reset input value to current display value
+            inputElement.value = displayElement.textContent.trim();
+
+            // Hide input and show display
+            inputElement.classList.add('hidden');
+            displayElement.classList.remove('hidden');
+            editBtn.classList.remove('hidden');
+
+            // Remove event listeners
+            inputElement.removeEventListener('blur', () => saveItemCode(container, detailId));
+            inputElement.removeEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    saveItemCode(container, detailId);
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelItemCodeEdit(container);
+                }
+            });
         }
     </script>
 </body>

@@ -1,16 +1,35 @@
-<?php 
-session_start(); 
+<?php
+// Enable error reporting for debugging - MUST BE FIRST
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+// Debug output
+echo "<!-- Debug: Error reporting enabled -->\n";
+
+// Start session
+session_start();
+
+// Debug session
+echo "<!-- Debug: Session started, user_id: " . (isset($_SESSION['user_id']) ? $_SESSION['user_id'] : 'not set') . " -->\n"; 
 if(!isset($_SESSION['user_id'])) header("Location: login.php"); 
 require_once 'auth/authenticate.php';
+echo "<!-- Debug: Auth loaded -->\n";
+
 require_once 'db/conn.php';
+echo "<!-- Debug: DB connection loaded -->\n";
+
 restrictAccess(['Staff']);
+echo "<!-- Debug: Access restricted -->\n";
 
 $full_name = $_SESSION['full_name'] ?? 'Staff Member';
 $department = $_SESSION['dept'] ?? 'Facilities Management';
 $current_date = date('F j, Y');
 
 // Fetch previous submissions count for badge
-$previousCount = $conn->query("SELECT COUNT(*) FROM uniform_headers WHERE StaffUID = {$_SESSION['user_id']}")->fetchColumn();
+echo "<!-- Debug: About to query database -->\n";
+$previousCount = safeQuerySingle("SELECT COUNT(*) FROM uniform_headers WHERE StaffUID = ?", [$_SESSION['user_id']]);
+echo "<!-- Debug: Database query completed, count: $previousCount -->\n";
 ?>
 <!DOCTYPE html>
 <html lang="en">

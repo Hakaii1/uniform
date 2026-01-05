@@ -174,7 +174,8 @@ if (!empty($inspection_ids)) {
 
         <div class="p-6 border-t border-gray-100">
             <a href="logout.php" class="flex items-center space-x-3 text-gray-500 hover:text-red-400 transition pl-2">
-                <i class="fas fa-sign-out-alt text-lg"></i><span class="font-bold">Logout</span>
+                <i class="fas fa-sign-out-alt"></i>
+                <span class="font-semibold">Log Out</span>
             </a>
         </div>
     </aside>

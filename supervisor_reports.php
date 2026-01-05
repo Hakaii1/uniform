@@ -5,7 +5,7 @@ restrictAccess(['Supervisor', 'Team Leader']);
 
 // Get filter and pagination parameters
 $status_filter = $_GET['status'] ?? 'all';
-$shift_filter = $_GET['shift'] ?? 'all'; // Capture Shift Parameter
+$shift_filter = $_GET['shift'] ?? 'all';
 $date_from = $_GET['date_from'] ?? '';
 $date_to = $_GET['date_to'] ?? '';
 $staff_search = $_GET['staff_search'] ?? '';
@@ -19,9 +19,8 @@ $allowed_sort = ['DateCreated', 'DateUpdated', 'StaffName', 'Status', 'Inspectio
 $sort_by = in_array($sort_by, $allowed_sort) ? $sort_by : 'DateCreated';
 $sort_order = strtoupper($sort_order) === 'ASC' ? 'ASC' : 'DESC';
 
-// Build WHERE clause
-// Note: To see "Pending" items in reports, add 'Pending' to this list.
-$where_conditions = ["h.Status IN ('Approved', 'Rejected')"]; 
+// --- Filter Conditions ---
+$where_conditions = ["1=1"]; 
 $params = [];
 
 if ($status_filter !== 'all') {
@@ -29,7 +28,6 @@ if ($status_filter !== 'all') {
     $params[':status'] = $status_filter;
 }
 
-// Add Shift Logic to SQL
 if ($shift_filter !== 'all') {
     $where_conditions[] = "h.Shift = :shift";
     $params[':shift'] = $shift_filter;
@@ -52,10 +50,10 @@ if (!empty($staff_search)) {
 
 $where_clause = implode(' AND ', $where_conditions);
 
-// Get total count for pagination
+// --- Count Query ---
 $count_sql = "SELECT COUNT(DISTINCT h.InspectionID) 
               FROM uniform_headers h 
-              JOIN lrn_master_list m ON h.StaffUID = m.id 
+              LEFT JOIN lrn_master_list m ON h.StaffUID = m.id 
               WHERE $where_clause";
 $count_stmt = $conn->prepare($count_sql);
 $count_stmt->execute($params);
@@ -63,7 +61,30 @@ $total_records = $count_stmt->fetchColumn();
 $total_pages = ceil($total_records / $per_page);
 $offset = ($page - 1) * $per_page;
 
-// Build ORDER BY clause
+// --- Prepare Export Data & Modal Summary ---
+// Map current parameters to export query string
+$export_params = [
+    'start_date' => $date_from,  // Mapped to start_date for compatibility
+    'end_date' => $date_to,      // Mapped to end_date
+    'status' => $status_filter,
+    'shift' => $shift_filter,
+    'staff_search' => $staff_search,
+    'sort_by' => $sort_by,
+    'sort_order' => $sort_order
+];
+$export_url = 'export_report.php?' . http_build_query($export_params);
+
+// Generate summary of active filters for the modal
+$active_filters_summary = [];
+if ($status_filter !== 'all') $active_filters_summary[] = "Status: <strong>" . htmlspecialchars($status_filter) . "</strong>";
+if ($shift_filter !== 'all') $active_filters_summary[] = "Shift: <strong>" . htmlspecialchars($shift_filter) . "</strong>";
+if (!empty($date_from)) $active_filters_summary[] = "From: <strong>" . htmlspecialchars($date_from) . "</strong>";
+if (!empty($date_to)) $active_filters_summary[] = "To: <strong>" . htmlspecialchars($date_to) . "</strong>";
+if (!empty($staff_search)) $active_filters_summary[] = "Staff: <strong>" . htmlspecialchars($staff_search) . "</strong>";
+if (empty($active_filters_summary)) $active_filters_summary[] = "<em>No specific filters (All records)</em>";
+
+
+// --- Order By ---
 $sort_column_map = [
     'DateCreated' => 'h.DateCreated',
     'DateUpdated' => 'h.DateUpdated',
@@ -79,10 +100,10 @@ if ($sort_by !== 'InspectionID') {
     $order_by = "ORDER BY $sort_column $sort_order";
 }
 
-// Fetch history
-$sql = "SELECT DISTINCT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.Shift, m.FullName AS StaffName
+// --- Main Query: Fetch Headers with StaffUID ---
+$sql = "SELECT DISTINCT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.Shift, h.StaffUID
         FROM uniform_headers h 
-        JOIN lrn_master_list m ON h.StaffUID = m.id 
+        LEFT JOIN lrn_master_list m ON h.StaffUID = m.id 
         WHERE $where_clause 
         $order_by
         OFFSET :offset ROWS FETCH NEXT :per_page ROWS ONLY";
@@ -96,14 +117,47 @@ $stmt->bindValue(':per_page', $per_page, PDO::PARAM_INT);
 $stmt->execute();
 $headers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// --- Fetch Staff Names Separately ---
+$staff_names = [];
+if (!empty($headers)) {
+    $staff_uids = array_unique(array_column($headers, 'StaffUID'));
+    // CRITICAL: Reset keys to avoid PDO parameter mismatch
+    $staff_uids = array_values($staff_uids); 
+
+    if (!empty($staff_uids)) {
+        $placeholders = implode(',', array_fill(0, count($staff_uids), '?'));
+        $staff_sql = "SELECT id, FirstName, LastName FROM lrn_master_list WHERE id IN ($placeholders)";
+        
+        if (function_exists('safeQueryAll')) {
+            $staff_results = safeQueryAll($staff_sql, $staff_uids, true);
+        } else {
+            $staff_stmt = $conn->prepare($staff_sql);
+            $staff_stmt->execute($staff_uids);
+            $staff_results = $staff_stmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        foreach ($staff_results as $staff) {
+            $staff_names[$staff['id']] = trim($staff['FirstName'] . ' ' . $staff['LastName']);
+        }
+    }
+}
+
+// Map names back to headers
+foreach ($headers as &$header) {
+    $header['StaffName'] = $staff_names[$header['StaffUID']] ?? 'Unknown Staff';
+}
+unset($header);
+
+// --- Fetch Inspection Details ---
 $inspection_ids = array_column($headers, 'InspectionID');
 $history = [];
 
 if (!empty($inspection_ids)) {
     $placeholders = implode(',', array_fill(0, count($inspection_ids), '?'));
-    $details_sql = "SELECT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.Shift, m.FullName AS StaffName, d.ItemCode, d.Description, d.RemovalOfDirt, d.QtyWashed, d.QtyRepair, d.QtyDisposal, d.Remarks, d.StaffPhoto 
+    
+    $details_sql = "SELECT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.Shift, h.StaffUID, 
+                           d.ItemCode, d.Description, d.RemovalOfDirt, d.QtyWashed, d.QtyRepair, d.QtyDisposal, d.Remarks, d.StaffPhoto 
                     FROM uniform_headers h 
-                    JOIN lrn_master_list m ON h.StaffUID = m.id 
                     LEFT JOIN uniform_details d ON h.InspectionID = d.InspectionID 
                     WHERE h.InspectionID IN ($placeholders) 
                     ORDER BY h.InspectionID, d.ItemCode";
@@ -114,13 +168,15 @@ if (!empty($inspection_ids)) {
     foreach ($rows as $row) {
         $id = $row['InspectionID'];
         if (!isset($history[$id])) {
+            $staffName = $staff_names[$row['StaffUID']] ?? 'Unknown Staff';
+            
             $history[$id] = [
                 'header' => [
                     'InspectionID' => $row['InspectionID'], 
                     'DateCreated' => $row['DateCreated'], 
                     'DateUpdated' => $row['DateUpdated'], 
                     'Status' => $row['Status'], 
-                    'StaffName' => $row['StaffName'], 
+                    'StaffName' => $staffName, 
                     'SupervisorSign' => $row['SupervisorSign'],
                     'Shift' => $row['Shift'] 
                 ],
@@ -166,23 +222,32 @@ if (!empty($inspection_ids)) {
                 </div>
                 <div>
                     <h2 class="text-3xl font-black text-primary tracking-tight">La Rose Noire</h2>
-                    <p class="text-xs font-bold text-gray-500 mt-1 uppercase tracking-widest">Facilities Management</p>
+                    <p class="text-xs font-bold text-gray-500 mt-1 uppercase tracking-widest">Facilities Management Department</p>
                 </div>
             </div>
         </div>
 
-        <nav class="flex-1 px-6 py-8 space-y-3">
-            <a href="supervisor_dashboard.php" class="nav-item flex items-center space-x-3 px-6 py-4 rounded-2xl text-gray-500 hover:bg-pink-50 hover:text-primary transition-all">
-                <i class="fas fa-clipboard-check text-xl"></i><span class="font-bold hidden lg:block">Uniform Inspections</span>
+        <nav class="flex-1 px-6 py-8 space-y-4">
+            <a href="supervisor_dashboard.php" class="nav-item flex items-center space-x-4 px-6 py-5 rounded-2xl text-gray-500 hover:bg-pink-50/50 hover:text-primary transition-all duration-300 group">
+                <div class="w-12 h-12 bg-gray-100 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
+                    <i class="fas fa-clipboard-check text-xl"></i>
+                </div>
+                <span class="font-bold text-lg">Uniform Inspections</span>
             </a>
-            <a href="supervisor_reports.php" class="nav-item active flex items-center space-x-3 px-6 py-4 rounded-2xl bg-gradient-to-r from-primary to-primary-dark text-white shadow-lg shadow-pink-200">
-                <i class="fas fa-chart-bar text-xl"></i><span class="font-bold hidden lg:block">Reports</span>
+            <a href="supervisor_reports.php" class="nav-item active flex items-center space-x-4 px-6 py-5 rounded-2xl bg-gradient-to-r from-primary to-primary-dark text-white shadow-lg shadow-pink-200/50 transition-all duration-300 group">
+                <div class="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
+                    <i class="fas fa-chart-bar text-xl"></i>
+                </div>
+                <span class="font-bold text-lg">Reports & History</span>
             </a>
         </nav>
 
-        <div class="p-6 border-t border-gray-100">
-            <a href="logout.php" class="flex items-center space-x-3 text-gray-500 hover:text-red-400 transition pl-2">
-                <i class="fas fa-sign-out-alt text-lg"></i><span class="font-bold hidden lg:block">Logout</span>
+        <div class="p-6 border-t border-white/20">
+            <a href="logout.php" class="flex items-center space-x-4 px-4 py-3 rounded-xl text-gray-500 hover:bg-red-50 hover:text-red-400 transition-all duration-300 group">
+                <div class="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center group-hover:scale-110 transition-transform">
+                    <i class="fas fa-sign-out-alt"></i>
+                </div>
+                <span class="font-semibold">Logout</span>
             </a>
         </div>
     </aside>
@@ -214,6 +279,7 @@ if (!empty($inspection_ids)) {
                         </label>
                         <select name="status" class="form-input w-full">
                             <option value="all" <?php echo $status_filter === 'all' ? 'selected' : ''; ?>>All Status</option>
+                            <option value="Pending" <?php echo $status_filter === 'Pending' ? 'selected' : ''; ?>>Pending</option>
                             <option value="Approved" <?php echo $status_filter === 'Approved' ? 'selected' : ''; ?>>Approved</option>
                             <option value="Rejected" <?php echo $status_filter === 'Rejected' ? 'selected' : ''; ?>>Rejected</option>
                         </select>
@@ -283,9 +349,10 @@ if (!empty($inspection_ids)) {
                         <a href="supervisor_reports.php" class="btn-secondary flex items-center gap-2">
                             <i class="fas fa-redo"></i> Reset
                         </a>
-                        <a href="export_report.php?start_date=<?php echo urlencode($date_from ?: date('Y-m-d', strtotime('-30 days'))); ?>&end_date=<?php echo urlencode($date_to ?: date('Y-m-d')); ?>&shift=<?php echo urlencode($shift_filter); ?>" class="btn-success flex items-center gap-2">
+                        
+                        <button type="button" onclick="openExportModal()" class="btn-success flex items-center gap-2">
                             <i class="fas fa-download"></i> Export
-                        </a>
+                        </button>
                     </div>
                 </div>
             </form>
@@ -326,29 +393,43 @@ if (!empty($inspection_ids)) {
                             </div>
                         </div>
                         <div class="text-right">
-                            <span class="status-badge <?php echo $insp['header']['Status'] === 'Approved' ? 'status-approved' : 'status-rejected'; ?> flex items-center gap-2 justify-end mb-2">
-                                <i class="fas <?php echo $insp['header']['Status'] === 'Approved' ? 'fa-check-circle' : 'fa-times-circle'; ?>"></i> <?php echo $insp['header']['Status']; ?>
+                            <?php 
+                                $statusClass = match($insp['header']['Status']) {
+                                    'Approved' => 'status-approved',
+                                    'Rejected' => 'status-rejected',
+                                    default => 'bg-yellow-100 text-yellow-800'
+                                };
+                                $statusIcon = match($insp['header']['Status']) {
+                                    'Approved' => 'fa-check-circle',
+                                    'Rejected' => 'fa-times-circle',
+                                    default => 'fa-clock'
+                                };
+                            ?>
+                            <span class="status-badge <?php echo $statusClass; ?> flex items-center gap-2 justify-end mb-2">
+                                <i class="fas <?php echo $statusIcon; ?>"></i> <?php echo $insp['header']['Status']; ?>
                             </span>
                         </div>
                     </div>
 
                     <div class="overflow-x-auto p-8">
                         <div class="table rounded-2xl overflow-hidden">
-                            <table class="w-full">
-                                <thead>
-                                    <tr>
-                                        <th>Item Code</th>
-                                        <th>Description</th>
-                                        <th>Removal of Dirt / Foreign Objects</th>
-                                        <th class="text-center">Quantity Washed</th>
-                                        <th class="text-center">Quantity for Repair</th>
-                                        <th class="text-center">Quantity for Disposal</th>
-                                        <th>Remarks</th>
-                                        <th class="text-center">Photo</th>
-                                        <th class="text-center">Date Created</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
+                        <table class="w-full">
+                            <thead>
+                                <tr>
+                                    <th>Item Code</th>
+                                    <th>Description</th>
+                                    <th>Removal of Dirt / Foreign Objects</th>
+                                    <th class="text-center">Quantity Washed</th>
+                                    <th class="text-center">Quantity for Repair</th>
+                                    <th class="text-center">Quantity for Disposal</th>
+                                    <th>Remarks</th>
+                                    <th class="text-center">Photo</th>
+                                    <th class="text-center">Signature</th>
+                                    <th class="text-center">Date Created</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (!empty($insp['items'])): ?>
                                     <?php foreach ($insp['items'] as $item): ?>
                                     <tr>
                                         <td class="font-mono font-bold text-gray-600"><?php echo htmlspecialchars($item['ItemCode'] ?? '—'); ?></td>
@@ -367,22 +448,44 @@ if (!empty($inspection_ids)) {
                                         <td class="text-center">
                                             <?php if ($item['StaffPhoto'] && file_exists($item['StaffPhoto'])): ?>
                                                 <img src="<?php echo htmlspecialchars($item['StaffPhoto']); ?>" 
-                                                     class="photo-preview mx-auto"
-                                                     onclick="openPhotoModal('<?php echo htmlspecialchars($item['StaffPhoto']); ?>')">
+                                                        class="photo-preview mx-auto"
+                                                        onclick="openPhotoModal('<?php echo htmlspecialchars($item['StaffPhoto']); ?>')">
                                             <?php else: ?>
                                                 <div class="photo-placeholder mx-auto">
                                                     <i class="fas fa-image text-lg"></i>
                                                 </div>
                                             <?php endif; ?>
                                         </td>
+                                        
+                                        <td class="text-center">
+                                            <?php 
+                                            $signPath = $insp['header']['SupervisorSign'];
+                                            if (!empty($signPath) && file_exists($signPath)): 
+                                            ?>
+                                                <img src="<?php echo htmlspecialchars($signPath); ?>" 
+                                                    class="h-14 mx-auto object-contain cursor-pointer hover:scale-150 transition-transform bg-white rounded border border-gray-200 p-1"
+                                                    onclick="openPhotoModal('<?php echo htmlspecialchars($signPath); ?>')"
+                                                    alt="Signed">
+                                            <?php else: ?>
+                                                <span class="text-xs text-gray-400 italic">
+                                                    <i class="fas fa-pen-fancy mr-1"></i> Not Signed
+                                                </span>
+                                            <?php endif; ?>
+                                        </td>
+
                                         <td class="text-center text-sm text-gray-600">
                                             <i class="fas fa-calendar mr-1 text-primary"></i>
                                             <?php echo date('M d, Y H:i', strtotime($insp['header']['DateCreated'])); ?>
                                         </td>
                                     </tr>
                                     <?php endforeach; ?>
-                                </tbody>
-                            </table>
+                                <?php else: ?>
+                                    <tr>
+                                        <td colspan="10" class="text-center py-4 text-gray-500 italic">No item details found for this inspection.</td>
+                                    </tr>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
                         </div>
                     </div>
                 </div>
@@ -393,7 +496,7 @@ if (!empty($inspection_ids)) {
                         <i class="fas fa-chart-bar text-6xl text-pink-400"></i>
                     </div>
                     <h3 class="text-2xl font-bold text-gray-800 mb-2">No History Available</h3>
-                    <p class="text-gray-500 text-lg">Completed inspections will appear here</p>
+                    <p class="text-gray-500 text-lg">Try adjusting your filters to see more results.</p>
                 </div>
             <?php endif; ?>
         </div>
@@ -479,7 +582,55 @@ if (!empty($inspection_ids)) {
             </div>
         </div>
     </div>
+
+    <div id="export-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                        <i class="fas fa-file-excel text-green-600"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-xl font-bold text-gray-800">Confirm Export</h3>
+                        <p class="text-sm text-gray-600">Review your export details</p>
+                    </div>
+                </div>
+                <button class="modal-close" onclick="closeExportModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="bg-gray-50 rounded-xl p-4 mb-6 border border-gray-200">
+                    <div class="flex justify-between items-center mb-3">
+                        <span class="text-sm font-bold text-gray-500 uppercase">Total Records</span>
+                        <span class="text-xl font-bold text-primary"><?php echo number_format($total_records); ?></span>
+                    </div>
+                    <hr class="border-gray-200 mb-3">
+                    <p class="text-sm font-bold text-gray-500 uppercase mb-2">Filters Applied:</p>
+                    <ul class="text-sm text-gray-700 space-y-1 pl-2">
+                        <?php foreach ($active_filters_summary as $summary): ?>
+                            <li class="flex items-center gap-2">
+                                <i class="fas fa-check text-green-400 text-xs"></i>
+                                <?php echo $summary; ?>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                </div>
+                <p class="text-gray-600 mb-6 text-sm">
+                    This will download a CSV/Excel file containing the filtered records.
+                </p>
+                <div class="flex gap-4">
+                    <button type="button" onclick="closeExportModal()" class="btn-secondary flex-1">Cancel</button>
+                    <a href="<?php echo htmlspecialchars($export_url); ?>" class="btn-success flex-1 text-center justify-center">
+                        Yes, Download File
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
+        // Photo Modal Functions
         function openPhotoModal(src) {
             document.getElementById('modal-photo').src = src;
             document.getElementById('photo-modal').classList.add('active');
@@ -487,11 +638,28 @@ if (!empty($inspection_ids)) {
         function closePhotoModal() {
             document.getElementById('photo-modal').classList.remove('active');
         }
+
+        // Export Modal Functions
+        function openExportModal() {
+            document.getElementById('export-modal').classList.add('active');
+        }
+        function closeExportModal() {
+            document.getElementById('export-modal').classList.remove('active');
+        }
+
+        // Close on Escape or Outside Click
         document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') closePhotoModal();
+            if (e.key === 'Escape') {
+                closePhotoModal();
+                closeExportModal();
+            }
         });
-        document.getElementById('photo-modal').addEventListener('click', function(e) {
-            if (e.target === this) closePhotoModal();
+        document.querySelectorAll('.modal-overlay').forEach(overlay => {
+            overlay.addEventListener('click', function(e) {
+                if (e.target === this) {
+                    this.classList.remove('active');
+                }
+            });
         });
     </script>
 </body>

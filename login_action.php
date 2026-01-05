@@ -1,38 +1,70 @@
 <?php
+// Enable error reporting
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
 session_start();
 require_once 'db/conn.php';
 
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $user_input = $_POST['username'];
+    $user_input = $_POST['username']; // This is "40970"
     $pass_input = $_POST['password'];
 
-    // This query JOINs the two tables using id and EmployeeID
-    $sql = "SELECT m.id, m.FullName, m.JobLevel, m.Department 
-            FROM accounts a
-            JOIN lrn_master_list m ON a.EmployeeID = m.id
-            WHERE a.Username = ? AND a.Password = ?";
-    
-    $stmt = $conn->prepare($sql);
-    $stmt->execute([$user_input, $pass_input]);
-    $user = $stmt->fetch();
+    try {
+        // 3. Handle Login - Single JOIN query approach
+        $sql = "SELECT lu.username, lu.password, lu.status, lu.user_id,
+                ml.id, ml.FirstName, ml.LastName, ml.JobLevel, ml.Department, ml.PositionTitle, ml.RoleProfile, ml.EmployeeID,
+                ml.FirstName + ' ' + ml.LastName as fullname
+                FROM lrnph_users lu
+                LEFT JOIN lrn_master_list ml
+                ON lu.username = ml.BiometricsID
+                WHERE lu.username = ? AND LOWER(lu.status) = 'active'";
 
-    if ($user) {
-        // Use 'id' from lrn_master_list as the session user_id
-        $_SESSION['user_id'] = $user['id']; 
-        $_SESSION['full_name'] = $user['FullName'];
+        $user = safeQueryRow($sql, [$user_input], true);
+
+        if (!$user) {
+            header("Location: login.php?error=invalid_credentials");
+            exit();
+        }
+
+        // 2. Verify Password
+        if (!password_verify($pass_input, $user['password'])) {
+            header("Location: login.php?error=invalid_credentials");
+            exit();
+        }
+
+        // Found the correct person!
+        // Set Session Variables
+        $_SESSION['user_id'] = $user['id']; // Use the master list ID
+        $_SESSION['full_name'] = trim($user['fullname']);
         $_SESSION['job_level'] = $user['JobLevel'];
+        $_SESSION['position'] = $user['PositionTitle'];
         $_SESSION['dept'] = $user['Department'];
 
-        // Redirect based on JobLevel found in lrn_master_list
-        if ($user['JobLevel'] === 'Supervisor' || $user['JobLevel'] === 'Team Leader') {
+        // 4. Redirect Logic
+        $checkLevel = strtolower(trim($user['JobLevel']));
+        $checkPosition = strtolower(trim($user['PositionTitle'] ?? ''));
+
+        $supervisorRoles = [
+            'supervisor a',
+            'supervisor b',
+            'supervisor c',
+            'team leader',
+            'teamlead',
+            'tl'
+        ];
+
+        if (in_array($checkLevel, $supervisorRoles) || in_array($checkPosition, $supervisorRoles)) {
             header("Location: supervisor_dashboard.php");
         } else {
             header("Location: staff_entry.php");
         }
         exit();
-    } else {
-        header("Location: login.php?error=invalid_credentials");
-        exit();
+    } catch (PDOException $e) {
+        die("Database Error: " . $e->getMessage());
     }
+} else {
+    header("Location: login.php");
+    exit();
 }
 ?>
