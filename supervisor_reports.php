@@ -3,21 +3,51 @@ require_once 'db/conn.php';
 require_once 'auth/authenticate.php';
 restrictAccess(['Supervisor', 'Team Leader']);
 
-// Get filter and pagination parameters
+// -------------------------------------------------------------------------
+// 1. HEADER PROFILE LOGIC: Fetch Logged-in Supervisor's EmployeeID
+// -------------------------------------------------------------------------
+$currentFullName = $_SESSION['full_name'];
+$myEmployeeID = null;
+
+// Query the master list using the Full Name
+$empIdStmt = $conn->prepare("SELECT TOP 1 EmployeeID FROM LRNPH_E.dbo.lrn_master_list WHERE (FirstName + ' ' + LastName) = ?");
+$empIdStmt->execute([$currentFullName]);
+$myEmployeeID = $empIdStmt->fetchColumn();
+
+// Default to .jpg
+$supervisorProfileUrl = $myEmployeeID ? "http://10.2.0.8/lrnph/emp_photos/" . $myEmployeeID . ".jpg" : null;
+// -------------------------------------------------------------------------
+
+// --- Get Filter & Pagination Parameters ---
 $status_filter = $_GET['status'] ?? 'all';
 $shift_filter = $_GET['shift'] ?? 'all';
 $date_from = $_GET['date_from'] ?? '';
 $date_to = $_GET['date_to'] ?? '';
 $staff_search = $_GET['staff_search'] ?? '';
-$sort_by = $_GET['sort_by'] ?? 'DateCreated';
-$sort_order = $_GET['sort_order'] ?? 'DESC';
 $page = max(1, intval($_GET['page'] ?? 1));
 $per_page = 10; 
 
-// Validate sort parameters
+// --- Sorting Logic ---
+$sort_by_raw = $_GET['sort_by'] ?? 'DateCreated';
+$sort_order_raw = $_GET['sort_order'] ?? 'DESC';
 $allowed_sort = ['DateCreated', 'DateUpdated', 'StaffName', 'Status', 'InspectionID'];
-$sort_by = in_array($sort_by, $allowed_sort) ? $sort_by : 'DateCreated';
-$sort_order = strtoupper($sort_order) === 'ASC' ? 'ASC' : 'DESC';
+$sort_by = in_array($sort_by_raw, $allowed_sort) ? $sort_by_raw : 'DateCreated';
+$sort_order = strtoupper($sort_order_raw) === 'ASC' ? 'ASC' : 'DESC';
+
+$sort_column_map = [
+    'DateCreated' => 'h.DateCreated',
+    'DateUpdated' => 'h.DateUpdated',
+    'StaffName' => 'm.FirstName',
+    'Status' => 'h.Status',
+    'InspectionID' => 'h.InspectionID'
+];
+$sort_sql_column = $sort_column_map[$sort_by];
+
+if ($sort_by !== 'InspectionID') {
+    $order_by = "ORDER BY $sort_sql_column $sort_order, h.InspectionID DESC";
+} else {
+    $order_by = "ORDER BY $sort_sql_column $sort_order";
+}
 
 // --- Filter Conditions ---
 $where_conditions = ["1=1"]; 
@@ -27,24 +57,20 @@ if ($status_filter !== 'all') {
     $where_conditions[] = "h.Status = :status";
     $params[':status'] = $status_filter;
 }
-
 if ($shift_filter !== 'all') {
     $where_conditions[] = "h.Shift = :shift";
     $params[':shift'] = $shift_filter;
 }
-
 if (!empty($date_from)) {
     $where_conditions[] = "CAST(h.DateCreated AS DATE) >= :date_from";
     $params[':date_from'] = $date_from;
 }
-
 if (!empty($date_to)) {
     $where_conditions[] = "CAST(h.DateCreated AS DATE) <= :date_to";
     $params[':date_to'] = $date_to;
 }
-
 if (!empty($staff_search)) {
-    $where_conditions[] = "m.FullName LIKE :staff_search";
+    $where_conditions[] = "(m.FirstName + ' ' + m.LastName) LIKE :staff_search";
     $params[':staff_search'] = '%' . $staff_search . '%';
 }
 
@@ -53,7 +79,7 @@ $where_clause = implode(' AND ', $where_conditions);
 // --- Count Query ---
 $count_sql = "SELECT COUNT(DISTINCT h.InspectionID) 
               FROM uniform_headers h 
-              LEFT JOIN lrn_master_list m ON h.StaffUID = m.id 
+              LEFT JOIN LRNPH_E.dbo.lrn_master_list m ON h.StaffUID = m.id 
               WHERE $where_clause";
 $count_stmt = $conn->prepare($count_sql);
 $count_stmt->execute($params);
@@ -62,10 +88,9 @@ $total_pages = ceil($total_records / $per_page);
 $offset = ($page - 1) * $per_page;
 
 // --- Prepare Export Data & Modal Summary ---
-// Map current parameters to export query string
 $export_params = [
-    'start_date' => $date_from,  // Mapped to start_date for compatibility
-    'end_date' => $date_to,      // Mapped to end_date
+    'start_date' => $date_from,
+    'end_date' => $date_to,
     'status' => $status_filter,
     'shift' => $shift_filter,
     'staff_search' => $staff_search,
@@ -74,7 +99,6 @@ $export_params = [
 ];
 $export_url = 'export_report.php?' . http_build_query($export_params);
 
-// Generate summary of active filters for the modal
 $active_filters_summary = [];
 if ($status_filter !== 'all') $active_filters_summary[] = "Status: <strong>" . htmlspecialchars($status_filter) . "</strong>";
 if ($shift_filter !== 'all') $active_filters_summary[] = "Shift: <strong>" . htmlspecialchars($shift_filter) . "</strong>";
@@ -83,27 +107,11 @@ if (!empty($date_to)) $active_filters_summary[] = "To: <strong>" . htmlspecialch
 if (!empty($staff_search)) $active_filters_summary[] = "Staff: <strong>" . htmlspecialchars($staff_search) . "</strong>";
 if (empty($active_filters_summary)) $active_filters_summary[] = "<em>No specific filters (All records)</em>";
 
-
-// --- Order By ---
-$sort_column_map = [
-    'DateCreated' => 'h.DateCreated',
-    'DateUpdated' => 'h.DateUpdated',
-    'StaffName' => 'm.FullName',
-    'Status' => 'h.Status',
-    'InspectionID' => 'h.InspectionID'
-];
-$sort_column = $sort_column_map[$sort_by] ?? 'h.DateCreated';
-
-if ($sort_by !== 'InspectionID') {
-    $order_by = "ORDER BY $sort_column $sort_order, h.InspectionID DESC";
-} else {
-    $order_by = "ORDER BY $sort_column $sort_order";
-}
-
-// --- Main Query: Fetch Headers with StaffUID ---
-$sql = "SELECT DISTINCT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.Shift, h.StaffUID
+// --- Main Query: Fetch Headers ---
+$sql = "SELECT DISTINCT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.Shift, h.StaffUID,
+        m.FirstName, m.LastName, m.EmployeeID
         FROM uniform_headers h 
-        LEFT JOIN lrn_master_list m ON h.StaffUID = m.id 
+        LEFT JOIN LRNPH_E.dbo.lrn_master_list m ON h.StaffUID = m.id 
         WHERE $where_clause 
         $order_by
         OFFSET :offset ROWS FETCH NEXT :per_page ROWS ONLY";
@@ -119,14 +127,14 @@ $headers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // --- Fetch Staff Names Separately ---
 $staff_names = [];
+$staff_ids = []; 
+
 if (!empty($headers)) {
-    $staff_uids = array_unique(array_column($headers, 'StaffUID'));
-    // CRITICAL: Reset keys to avoid PDO parameter mismatch
-    $staff_uids = array_values($staff_uids); 
+    $staff_uids = array_values(array_unique(array_column($headers, 'StaffUID'))); 
 
     if (!empty($staff_uids)) {
         $placeholders = implode(',', array_fill(0, count($staff_uids), '?'));
-        $staff_sql = "SELECT id, FirstName, LastName FROM lrn_master_list WHERE id IN ($placeholders)";
+        $staff_sql = "SELECT id, FirstName, LastName, EmployeeID FROM lrn_master_list WHERE id IN ($placeholders)";
         
         if (function_exists('safeQueryAll')) {
             $staff_results = safeQueryAll($staff_sql, $staff_uids, true);
@@ -138,13 +146,19 @@ if (!empty($headers)) {
 
         foreach ($staff_results as $staff) {
             $staff_names[$staff['id']] = trim($staff['FirstName'] . ' ' . $staff['LastName']);
+            $staff_ids[$staff['id']] = $staff['EmployeeID'];
         }
     }
 }
 
-// Map names back to headers
+// Map names and IDs back to headers
 foreach ($headers as &$header) {
-    $header['StaffName'] = $staff_names[$header['StaffUID']] ?? 'Unknown Staff';
+    if (!empty($header['FirstName'])) {
+        $header['StaffName'] = trim($header['FirstName'] . ' ' . $header['LastName']);
+    } else {
+        $header['StaffName'] = $staff_names[$header['StaffUID']] ?? 'Unknown Staff';
+        $header['EmployeeID'] = $staff_ids[$header['StaffUID']] ?? null;
+    }
 }
 unset($header);
 
@@ -153,6 +167,7 @@ $inspection_ids = array_column($headers, 'InspectionID');
 $history = [];
 
 if (!empty($inspection_ids)) {
+    $inspection_ids = array_values($inspection_ids);
     $placeholders = implode(',', array_fill(0, count($inspection_ids), '?'));
     
     $details_sql = "SELECT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.Shift, h.StaffUID, 
@@ -177,8 +192,9 @@ if (!empty($inspection_ids)) {
                     'DateUpdated' => $row['DateUpdated'], 
                     'Status' => $row['Status'], 
                     'StaffName' => $staffName, 
-                    'SupervisorSign' => $row['SupervisorSign'],
-                    'Shift' => $row['Shift'] 
+                    'SupervisorSign' => $row['SupervisorSign'], 
+                    'Shift' => $row['Shift'],
+                    'EmployeeID' => null 
                 ],
                 'items' => []
             ];
@@ -186,6 +202,17 @@ if (!empty($inspection_ids)) {
         if ($row['Description']) $history[$id]['items'][] = $row;
     }
 }
+
+// Re-sort history based on the Headers Query order
+$sorted_history = [];
+foreach ($headers as $h) {
+    if (isset($history[$h['InspectionID']])) {
+        $history[$h['InspectionID']]['header']['StaffName'] = $h['StaffName'];
+        $history[$h['InspectionID']]['header']['EmployeeID'] = $h['EmployeeID']; 
+        $sorted_history[] = $history[$h['InspectionID']];
+    }
+}
+$history = $sorted_history;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -207,6 +234,31 @@ if (!empty($inspection_ids)) {
                         warning: '#fbbf24',
                         danger: '#f87171'
                     }
+                }
+            }
+        }
+        
+        // --- Handle Image Extension Fallback (jpg -> png -> jpeg) ---
+        function handleAvatarError(img, empId, fallbackId) {
+            if (!empId) {
+                img.style.display = 'none';
+                if(document.getElementById(fallbackId)) document.getElementById(fallbackId).style.display = 'flex';
+                return;
+            }
+
+            const currentSrc = img.src;
+            const baseUrl = "http://10.2.0.8/lrnph/emp_photos/";
+            
+            // Try chain: .jpg (default) -> .png -> .jpeg -> fallback
+            if (currentSrc.includes('.jpg')) {
+                img.src = baseUrl + empId + ".png";
+            } else if (currentSrc.includes('.png')) {
+                img.src = baseUrl + empId + ".jpeg";
+            } else {
+                // All failed
+                img.style.display = 'none';
+                if(document.getElementById(fallbackId)) {
+                    document.getElementById(fallbackId).style.display = 'flex';
                 }
             }
         }
@@ -243,6 +295,11 @@ if (!empty($inspection_ids)) {
         </nav>
 
         <div class="p-6 border-t border-white/20">
+            <!-- Logo Footer -->
+            <div class="flex flex-col items-center mb-4">
+                <img src="images/logo.png" alt="Logo" class="h-20 w-auto opacity-80 mb-2">
+                <hr class="w-full border-gray-500">
+            </div>
             <a href="logout.php" class="flex items-center space-x-4 px-4 py-3 rounded-xl text-gray-500 hover:bg-red-50 hover:text-red-400 transition-all duration-300 group">
                 <div class="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center group-hover:scale-110 transition-transform">
                     <i class="fas fa-sign-out-alt"></i>
@@ -261,10 +318,21 @@ if (!empty($inspection_ids)) {
             <div class="flex items-center gap-4 bg-white/60 backdrop-blur-md px-6 py-3 rounded-full shadow-sm">
                 <div class="text-right hidden md:block">
                     <div class="text-sm font-bold text-gray-800"><?php echo $_SESSION['full_name']; ?></div>
-                    <div class="text-xs text-primary font-bold uppercase"><?php echo htmlspecialchars($_SESSION['job_level']); ?></div>
+                    <div class="text-xs text-primary font-bold uppercase"><?php echo htmlspecialchars($_SESSION['position']); ?></div>
                 </div>
-                <div class="w-12 h-12 rounded-full bg-gradient-to-tr from-primary to-purple-400 flex items-center justify-center text-white font-bold text-xl shadow-md">
-                    <?php echo strtoupper(substr($_SESSION['full_name'], 0, 1)); ?>
+                
+                <div class="relative w-12 h-12 rounded-full overflow-hidden shadow-md bg-gray-200">
+                    <?php if ($supervisorProfileUrl): ?>
+                        <img src="<?php echo htmlspecialchars($supervisorProfileUrl); ?>" 
+                             alt="Profile" 
+                             class="w-full h-full object-cover"
+                             onerror="handleAvatarError(this, '<?php echo $myEmployeeID; ?>', 'header-fallback-avatar')">
+                    <?php endif; ?>
+
+                    <div id="header-fallback-avatar" 
+                         class="<?php echo $supervisorProfileUrl ? 'hidden' : 'flex'; ?> w-full h-full bg-gradient-to-tr from-primary to-purple-400 items-center justify-center text-white font-bold text-xl absolute top-0 left-0">
+                        <?php echo strtoupper(substr($_SESSION['full_name'], 0, 1)); ?>
+                    </div>
                 </div>
             </div>
         </header>
@@ -377,18 +445,32 @@ if (!empty($inspection_ids)) {
                 <div class="card overflow-hidden group">
                     <div class="px-8 py-6 border-b border-white/30 bg-gradient-to-r from-white/40 to-white/20 flex justify-between items-center">
                         <div class="flex items-center gap-4">
-                            <div class="w-12 h-12 bg-gradient-to-r from-blue-400 to-purple-400 rounded-xl flex items-center justify-center shadow-lg">
-                                <i class="fas fa-file-check text-white"></i>
+                            <?php 
+                                $staffEmpID = $insp['header']['EmployeeID'];
+                                $staffPhotoUrl = $staffEmpID ? "http://10.2.0.8/lrnph/emp_photos/" . $staffEmpID . ".jpg" : null;
+                                $fallbackId = 'staff-fallback-' . $insp['header']['InspectionID'];
+                            ?>
+                            <div class="relative w-14 h-14 rounded-xl overflow-hidden shadow-lg bg-gray-100 flex items-center justify-center">
+                                <?php if ($staffPhotoUrl): ?>
+                                    <img src="<?php echo htmlspecialchars($staffPhotoUrl); ?>" 
+                                         alt="Staff" 
+                                         class="w-full h-full object-cover"
+                                         onerror="handleAvatarError(this, '<?php echo $staffEmpID; ?>', '<?php echo $fallbackId; ?>')">
+                                <?php endif; ?>
+                                
+                                <div id="<?php echo $fallbackId; ?>" 
+                                     class="<?php echo $staffPhotoUrl ? 'hidden' : 'flex'; ?> w-full h-full bg-gradient-to-r from-blue-400 to-purple-400 items-center justify-center text-white text-xl absolute top-0 left-0">
+                                    <i class="fas fa-user"></i>
+                                </div>
                             </div>
                             <div>
                                 <h2 class="text-xl font-bold text-gray-800">
-                                    #<?php echo str_pad($insp['header']['InspectionID'], 4, '0', STR_PAD_LEFT); ?>
+                                    <?php echo str_pad($insp['header']['InspectionID'], 4, '0', STR_PAD_LEFT); ?>
                                 </h2>
                                 <p class="text-sm text-gray-500 mt-1">
-                                    <i class="fas fa-user mr-2 text-primary"></i>
-                                    <span class="font-semibold text-primary"><?php echo htmlspecialchars($insp['header']['StaffName']); ?></span>
+                                    <span class="font-bold text-primary"><?php echo htmlspecialchars($insp['header']['StaffName']); ?></span>
                                     <span class="mx-2 text-gray-300">|</span>
-                                    <span class="font-bold text-gray-600 bg-gray-100 px-2 py-0.5 rounded text-xs"><?php echo htmlspecialchars($insp['header']['Shift'] ?? 'N/A'); ?></span>
+                                    <span class="font-bold text-primary bg-gray-100 px-2 py-0.5 rounded text-xs"><?php echo htmlspecialchars($insp['header']['Shift'] ?? 'N/A'); ?></span>
                                 </p>
                             </div>
                         </div>
@@ -473,9 +555,9 @@ if (!empty($inspection_ids)) {
                                             <?php endif; ?>
                                         </td>
 
-                                        <td class="text-center text-sm text-gray-600">
+                                        <td class="text-center text-sm text-gray-600 whitespace-nowrap">
                                             <i class="fas fa-calendar mr-1 text-primary"></i>
-                                            <?php echo date('M d, Y H:i', strtotime($insp['header']['DateCreated'])); ?>
+                                            <?php echo date('M d, Y h:i A', strtotime($insp['header']['DateCreated'])); ?>
                                         </td>
                                     </tr>
                                     <?php endforeach; ?>

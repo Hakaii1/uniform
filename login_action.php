@@ -42,19 +42,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $_SESSION['dept'] = $user['Department'];
 
         // 4. Redirect Logic
-        $checkLevel = strtolower(trim($user['JobLevel']));
         $checkPosition = strtolower(trim($user['PositionTitle'] ?? ''));
 
-        $supervisorRoles = [
-            'supervisor a',
-            'supervisor b',
-            'supervisor c',
-            'team leader',
-            'teamlead',
-            'tl'
-        ];
+        // Check if PositionTitle contains "supervisor" or "team leader" (case insensitive)
+        $isSupervisor = stripos($checkPosition, 'supervisor') !== false ||
+                       stripos($checkPosition, 'team leader') !== false ||
+                       stripos($checkPosition, 'teamlead') !== false ||
+                       stripos($checkPosition, 'tl') !== false;
 
-        if (in_array($checkLevel, $supervisorRoles) || in_array($checkPosition, $supervisorRoles)) {
+        if ($isSupervisor && $user['Department'] == 'Production Department - LRN') {
             header("Location: supervisor_dashboard.php");
         } else {
             header("Location: staff_entry.php");

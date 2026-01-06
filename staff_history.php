@@ -8,21 +8,43 @@ restrictAccess(['Staff']);
 $full_name = $_SESSION['full_name'] ?? 'Staff Member';
 $department = $_SESSION['dept'] ?? 'Facilities Management';
 
-// Get filter and pagination parameters
+// --- Get Filter & Pagination Parameters ---
 $status_filter = $_GET['status'] ?? 'all';
 $date_from = $_GET['date_from'] ?? '';
 $date_to = $_GET['date_to'] ?? '';
-$sort_by = $_GET['sort_by'] ?? 'DateCreated';
-$sort_order = $_GET['sort_order'] ?? 'DESC';
 $page = max(1, intval($_GET['page'] ?? 1));
-$per_page = 10; // Records per page
+$per_page = 10; 
 
-// Validate sort parameters
+// --- Sorting Logic ---
+// 1. Get raw values
+$sort_by_raw = $_GET['sort_by'] ?? 'DateCreated';
+$sort_order_raw = $_GET['sort_order'] ?? 'DESC';
+
+// 2. Define allowed columns
 $allowed_sort = ['DateCreated', 'DateUpdated', 'Status', 'InspectionID'];
-$sort_by = in_array($sort_by, $allowed_sort) ? $sort_by : 'DateCreated';
-$sort_order = strtoupper($sort_order) === 'ASC' ? 'ASC' : 'DESC';
 
-// Build WHERE clause
+// 3. Validate and sanitize
+$sort_by = in_array($sort_by_raw, $allowed_sort) ? $sort_by_raw : 'DateCreated';
+$sort_order = strtoupper($sort_order_raw) === 'ASC' ? 'ASC' : 'DESC';
+
+// 4. Map to SQL columns
+$sort_column_map = [
+    'DateCreated' => 'h.DateCreated',
+    'DateUpdated' => 'h.DateUpdated',
+    'Status' => 'h.Status',
+    'InspectionID' => 'h.InspectionID'
+];
+$sort_sql_column = $sort_column_map[$sort_by];
+
+// 5. Build Order By Clause
+if ($sort_by !== 'InspectionID') {
+    // Secondary sort by ID to ensure stable pagination
+    $order_by = "ORDER BY $sort_sql_column $sort_order, h.InspectionID DESC";
+} else {
+    $order_by = "ORDER BY $sort_sql_column $sort_order";
+}
+
+// --- Build WHERE clause ---
 $where_conditions = ["h.StaffUID = :staff_uid"];
 $params = [':staff_uid' => $_SESSION['user_id']];
 
@@ -43,7 +65,7 @@ if (!empty($date_to)) {
 
 $where_clause = implode(' AND ', $where_conditions);
 
-// Get total count for pagination
+// --- Get total count for pagination ---
 $count_sql = "SELECT COUNT(DISTINCT h.InspectionID) 
               FROM uniform_headers h 
               WHERE $where_clause";
@@ -53,24 +75,7 @@ $total_records = $count_stmt->fetchColumn();
 $total_pages = ceil($total_records / $per_page);
 $offset = ($page - 1) * $per_page;
 
-// Build ORDER BY clause - map sort_by to actual column names
-$sort_column_map = [
-    'DateCreated' => 'h.DateCreated',
-    'DateUpdated' => 'h.DateUpdated',
-    'Status' => 'h.Status',
-    'InspectionID' => 'h.InspectionID'
-];
-$sort_column = $sort_column_map[$sort_by] ?? 'h.DateCreated';
-
-// Only add InspectionID as secondary sort if it's not already the primary sort
-if ($sort_by !== 'InspectionID') {
-    $order_by = "ORDER BY $sort_column $sort_order, h.InspectionID DESC";
-} else {
-    $order_by = "ORDER BY $sort_column $sort_order";
-}
-
-// Fetch submissions with pagination
-// CHANGED: Added RejectionReason to SELECT
+// --- Fetch Headers (Main Query) ---
 $sql = "SELECT DISTINCT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.RejectionReason
         FROM uniform_headers h 
         WHERE $where_clause 
@@ -86,14 +91,16 @@ $stmt->bindValue(':per_page', $per_page, PDO::PARAM_INT);
 $stmt->execute();
 $headers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Get inspection IDs
+// --- Get Inspection Details ---
 $inspection_ids = array_column($headers, 'InspectionID');
 $submissions = [];
 
 if (!empty($inspection_ids)) {
-    // Fetch details for these inspections
-    // CHANGED: Added RejectionReason to SELECT
+    // Reset keys for correct IN clause usage
+    $inspection_ids = array_values($inspection_ids);
     $placeholders = implode(',', array_fill(0, count($inspection_ids), '?'));
+    
+    // Note: This query usually orders by ID/ItemCode for structure, regardless of user sort preference
     $details_sql = "SELECT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.RejectionReason, 
                            d.ItemCode, d.Description, d.RemovalOfDirt, d.QtyWashed, d.QtyRepair, d.QtyDisposal, d.Remarks, d.StaffPhoto
                     FROM uniform_headers h
@@ -114,7 +121,7 @@ if (!empty($inspection_ids)) {
                     'DateUpdated' => $row['DateUpdated'], 
                     'Status' => $row['Status'], 
                     'SupervisorSign' => $row['SupervisorSign'],
-                    'RejectionReason' => $row['RejectionReason'] // CHANGED: Added mapping
+                    'RejectionReason' => $row['RejectionReason']
                 ],
                 'items' => []
             ];
@@ -122,6 +129,17 @@ if (!empty($inspection_ids)) {
         if ($row['ItemCode']) $submissions[$id]['items'][] = $row;
     }
 }
+
+// --- CRITICAL: Re-sort submissions based on the Header Query order ---
+// The details loop above creates the array in ID order. We must re-sort it
+// to match the user's selected sort order (from $headers).
+$sorted_submissions = [];
+foreach ($headers as $h) {
+    if (isset($submissions[$h['InspectionID']])) {
+        $sorted_submissions[] = $submissions[$h['InspectionID']];
+    }
+}
+$submissions = $sorted_submissions;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -173,9 +191,16 @@ if (!empty($inspection_ids)) {
         </nav>
 
         <div class="p-6 border-t border-gray-100">
-            <a href="logout.php" class="flex items-center space-x-3 text-gray-500 hover:text-red-400 transition pl-2">
-                <i class="fas fa-sign-out-alt"></i>
-                <span class="font-semibold">Log Out</span>
+            <!-- Logo Footer -->
+            <div class="flex flex-col items-center mb-4">
+                <img src="images/logo.png" alt="Logo" class="h-20 w-auto opacity-80 mb-2">
+                <hr class="w-full border-gray-500">
+            </div>
+            <a href="logout.php" class="flex items-center space-x-4 px-4 py-3 rounded-xl text-gray-500 hover:bg-red-50 hover:text-red-400 transition-all duration-300 group">
+                <div class="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center group-hover:scale-110 transition-transform">
+                    <i class="fas fa-sign-out-alt"></i>
+                </div>
+                <span class="font-semibold">Logout</span>
             </a>
         </div>
     </aside>
@@ -357,7 +382,7 @@ if (!empty($inspection_ids)) {
                                                     </div>
                                                 <?php endif; ?>
                                             </td>
-                                            <td class="text-center text-sm text-gray-600">
+                                            <td class="text-center text-sm text-gray-600 whitespace-nowrap">
                                                 <i class="fas fa-calendar mr-1 text-primary"></i>
                                                 <?php echo date('M d, Y g:i A', strtotime($sub['header']['DateCreated'])); ?>
                                             </td>
@@ -539,7 +564,7 @@ if (!empty($inspection_ids)) {
             document.getElementById('signature-modal').classList.remove('active');
         }
 
-        // CHANGED: Rejection Modal Functions
+        // Rejection Modal Functions
         function openRejectionModal(reason) {
             document.getElementById('rejection-reason-text').textContent = reason;
             document.getElementById('rejection-modal').classList.add('active');

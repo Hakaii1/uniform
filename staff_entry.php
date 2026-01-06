@@ -94,9 +94,16 @@ echo "<!-- Debug: Database query completed, count: $previousCount -->\n";
         </nav>
 
         <div class="p-6 border-t border-gray-100">
-            <a href="logout.php" class="flex items-center space-x-3 text-gray-500 hover:text-red-400 transition pl-2">
-                <i class="fas fa-sign-out-alt"></i>
-                <span class="font-semibold">Log Out</span>
+            <!-- Logo Footer -->
+            <div class="flex flex-col items-center mb-4">
+                <img src="images/logo.png" alt="Logo" class="h-20 w-auto opacity-80 mb-2">
+                <hr class="w-full border-gray-500">
+            </div>
+            <a href="logout.php" class="flex items-center space-x-4 px-4 py-3 rounded-xl text-gray-500 hover:bg-red-50 hover:text-red-400 transition-all duration-300 group">
+                <div class="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center group-hover:scale-110 transition-transform">
+                    <i class="fas fa-sign-out-alt"></i>
+                </div>
+                <span class="font-semibold">Logout</span>
             </a>
         </div>
     </aside>
