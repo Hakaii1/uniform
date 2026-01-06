@@ -40,17 +40,19 @@ if (!empty($date_to)) {
 }
 
 if (!empty($staff_search)) {
-    $where_conditions[] = "m.FullName LIKE :staff_search";
+    // FIXED: MSSQL cannot use aliases or virtual columns in WHERE.
+    // Must concatenate FirstName and LastName manually.
+    $where_conditions[] = "(m.FirstName + ' ' + m.LastName) LIKE :staff_search";
     $params[':staff_search'] = '%' . $staff_search . '%';
 }
 
 $where_clause = implode(' AND ', $where_conditions);
 
 // Get total count for pagination
-// FIXED: Changed JOIN to LEFT JOIN so orphaned records are counted
+// FIXED: Added full database path LRNPH_E.dbo.lrn_master_list because we are querying from the OJT database
 $count_sql = "SELECT COUNT(DISTINCT h.InspectionID) 
               FROM uniform_headers h 
-              LEFT JOIN lrn_master_list m ON h.StaffUID = m.id 
+              LEFT JOIN LRNPH_E.dbo.lrn_master_list m ON h.StaffUID = m.id 
               WHERE $where_clause";
 $count_stmt = $conn->prepare($count_sql);
 $count_stmt->execute($params);
@@ -61,7 +63,7 @@ $offset = ($page - 1) * $per_page;
 // Build ORDER BY clause - map sort_by to actual column names
 $sort_column_map = [
     'DateCreated' => 'h.DateCreated',
-    'StaffName' => 'h.StaffUID', // Sort by StaffUID since we can't sort by name directly from auth DB
+    'StaffName' => 'm.FirstName', // FIXED: Now sorts by First Name since we joined the table
     'InspectionID' => 'h.InspectionID'
 ];
 $sort_column = $sort_column_map[$sort_by] ?? 'h.DateCreated';
@@ -73,9 +75,11 @@ if ($sort_by !== 'InspectionID') {
     $order_by = "ORDER BY $sort_column $sort_order";
 }
 
-// Fetch pending inspections with pagination (without staff names first)
+// Fetch pending inspections with pagination
+// FIXED: Added LEFT JOIN LRNPH_E.dbo.lrn_master_list m to the main query so the WHERE clause works
 $sql = "SELECT DISTINCT h.InspectionID, h.DateCreated, h.DateUpdated, h.Status, h.SupervisorSign, h.StaffUID
         FROM uniform_headers h
+        LEFT JOIN LRNPH_E.dbo.lrn_master_list m ON h.StaffUID = m.id 
         WHERE $where_clause
         $order_by
         OFFSET :offset ROWS FETCH NEXT :per_page ROWS ONLY";
@@ -89,7 +93,7 @@ $stmt->bindValue(':per_page', $per_page, PDO::PARAM_INT);
 $stmt->execute();
 $headers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Get staff names from auth database
+// Get staff names from auth database (Optimization: Fetch only needed names)
 $staff_names = [];
 if (!empty($headers)) {
     $staff_uids = array_unique(array_column($headers, 'StaffUID'));

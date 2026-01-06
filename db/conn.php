@@ -7,45 +7,26 @@ error_reporting(E_ALL);
 /*
 DATABASE CONFIGURATION GUIDE
 ===========================
-
-This file connects to TWO separate databases:
-
-1. LRNPH_E (Authentication Database)
-   - Contains: lrnph_users (login accounts), lrn_master_list (user roles/info)
-   - Used for: Login authentication and user authorization
-
-2. LRNPH_OJT (Application Data Database)
-   - Contains: uniform_headers, uniform_details, etc. (application data)
-   - Used for: Storing and retrieving uniform inspection data
-
-CONFIGURATION:
-- Change the database names, usernames, and passwords below as needed
-- Each database can have different credentials
-- The server name is shared between both databases
-
-ERROR HANDLING:
-- Connection errors will show which database failed
-- Query errors will show the database name and SQL statement
+Updated: Switched to 'sa' account for ALL connections to allow cross-database joins.
 */
 
-// Database Configuration - CHANGE THESE VALUES AS NEEDED
-// =================================================================================
-
 // Server connection details
+// Added tcp: prefix and port 1433 to prevent Mac Driver Crashes
 $serverName = "10.2.0.9";
 
 // Database credentials for LRNPH_E (Authentication Database)
 $authDbConfig = [
-    'database' => 'LRNPH_E',           // CHANGE: Your auth database name
-    'username' => 'sa',                // CHANGE: Your auth database username
-    'password' => 'S3rverDB02lrn25'    // CHANGE: Your auth database password
+    'database' => 'LRNPH_E',
+    'username' => 'sa',
+    'password' => 'S3rverDB02lrn25'
 ];
 
 // Database credentials for LRNPH_OJT (Application Data Database)
+// UPDATED: Now using 'sa' account to match your request
 $dataDbConfig = [
-    'database' => 'LRNPH_OJT',         // CHANGE: Your data database name
-    'username' => 'kgulapa',           // CHANGE: Your data database username
-    'password' => 'Admin?!@#'          // CHANGE: Your data database password
+    'database' => 'LRNPH_OJT',
+    'username' => 'sa',               // CHANGED: Was 'kgulapa'
+    'password' => 'S3rverDB02lrn25'   // CHANGED: Was 'Admin?!@#'
 ];
 
 // =================================================================================
@@ -68,7 +49,6 @@ foreach ($dbConfigs as $key => $config) {
         // *** THE FIX IS HERE ***
         // Added "tcp:" before server name and ",1433" after it.
         $connections[$key] = new PDO(
-            //"sqlsrv:Server=$serverName;Database=" . $config['database'],
             "sqlsrv:Server=tcp:$serverName,1433;Database=" . $config['database'],
             $config['username'],
             $config['password'],
