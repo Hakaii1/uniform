@@ -37,8 +37,8 @@ $serverName = "10.2.0.9";
 // Database credentials for LRNPH_E (Authentication Database)
 $authDbConfig = [
     'database' => 'LRNPH_E',           // CHANGE: Your auth database name
-    'username' => 'sa',           // CHANGE: Your auth database username
-    'password' => 'S3rverDB02lrn25'          // CHANGE: Your auth database password
+    'username' => 'sa',                // CHANGE: Your auth database username
+    'password' => 'S3rverDB02lrn25'    // CHANGE: Your auth database password
 ];
 
 // Database credentials for LRNPH_OJT (Application Data Database)
@@ -65,8 +65,11 @@ $dbConfigs = [
 
 foreach ($dbConfigs as $key => $config) {
     try {
+        // *** THE FIX IS HERE ***
+        // Added "tcp:" before server name and ",1433" after it.
         $connections[$key] = new PDO(
-            "sqlsrv:Server=$serverName;Database=" . $config['database'],
+            //"sqlsrv:Server=$serverName;Database=" . $config['database'],
+            "sqlsrv:Server=tcp:$serverName,1433;Database=" . $config['database'],
             $config['username'],
             $config['password'],
             [
